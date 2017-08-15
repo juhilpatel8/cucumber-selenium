@@ -1,81 +1,90 @@
- private static TestConfiguration testConfiguration = null;
-  private static TestConfig testConfig = null;
-  private static final String defaultBrowser = "firefox";
-  private static String browser;
-  private static final String configName = "config/config.yml";
-  private static final Logger LOGGER = LogManager.getLogger(TestConfiguration.class);
+ private static TestDriver testDriver = null;
+  private static final String defaultEnvironment = "local";
+  public static String platform;
+  private static final Logger LOGGER = LogManager.getLogger(DriverHooks.class);
 
-  private TestConfiguration(String environment) {
-    List<TestConfig> lsOfTestConfig = new YAMLLoader().getAllConfig(configName);
-    lsOfTestConfig.stream().filter(config -> config.getEnvironmentName().equals(environment)).forEach(config -> testConfig = config);
+  static {
+    String tempEnv = System.getenv("CHANNEL_ENV");
+    String environment = tempEnv == null || tempEnv.isEmpty() ? defaultEnvironment : tempEnv;
+    TestConfiguration.loadConfiguration(environment);
   }
 
-  public static TestConfiguration loadConfiguration(String env) {
-    if (testConfiguration == null) {
-      LOGGER.info("Default Browser set for test execution: " + defaultBrowser);
-      String tempBrowser = System.getenv("CHANNEL_BROWSER");
-      browser = tempBrowser == null || tempBrowser.isEmpty() ? defaultBrowser : tempBrowser;
-      LOGGER.info("Executing the test via the browser: " + browser);
+  public static void beforeSuite() {
+    LOGGER.info("Before Suite started");
+    testDriver = TestDriver.getInstance();
+    testDriver.setTimeOut(TestConfiguration.getObjectTimeOut(), TestConfiguration.getPageTimeOut());
+    LOGGER.info("Before Suite completed");
+  }
 
-      testConfiguration = new TestConfiguration(env);
-      LOGGER.info("Loading the " + env + " environment details from the config file.");
+  @Before
+  public void beforeScenario(Scenario scenario) {
+    testDriver.clearCookies();
+    testDriver.listCookies();
+    platform = getPlatformFrom(scenario);
 
-      LOGGER.info("By default we use the pretender(stub) test data");
-      if (isStubed()) {
-        LOGGER.info("Executing the test using the pretender(stub) test data.");
-      }
-      else {
-        LOGGER.info("Executing the test using the " + env + " test data.");
-      }
+    Dimension dimension = FormFactor.valueOf(FormFactor.class, platform.toUpperCase()).asDimension();
+    testDriver.setWindowSize(dimension);
+  }
+
+  private String getPlatformFrom(Scenario scenario) {
+    if (scenario.getSourceTagNames().contains("@mobile")) {
+      return "mobile";
     }
-    return testConfiguration;
+    // default window size
+    return "desktop";
   }
 
-  public static String getBrowser() {
-    return browser;
+  public static void resetRedis(Collection<String> sourceTagNames) {
+    String portal = sourceTagNames.contains("@agent") ? "agent" : "customer";
+    String redisFlushURL = TestConfiguration.getRedisFlushURL(portal);
+    try {
+      HttpURLConnection connection = (HttpURLConnection) new URL(redisFlushURL).openConnection();
+      connection.connect();
+      if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+        LOGGER.warn("Unable to reset the redis using the URL: " + TestConfiguration.getPretenderResetURL());
+        LOGGER.warn("Response Code: " + connection.getResponseCode());
+        LOGGER.warn("Response Message: " + connection.getResponseMessage());
+        LOGGER.warn("Unable to reset the redis.");
+      }
+      LOGGER.info("Cleaning up state in redis. Return Status: " + connection.getResponseMessage());
+      connection.disconnect();
+    } catch (IOException e) {
+      LOGGER.error(e.fillInStackTrace());
+    }
   }
 
-  public static String getCustomerAppURL() {
-    return testConfig.getCustomerAppURL();
+  public static void resetPretender() {
+    resetState(TestConfiguration.getPretenderResetURL(), "pretender");
   }
 
-  public static String getAgentAppURL() {
-    return testConfig.getAgentAppUrl();
+  public static void afterSuite() {
+    if (testDriver != null) {
+      testDriver.quit();
+    }
   }
 
-  public static String getPretenderURL() {
-    return testConfig.getPretenderUrl();
+  @After
+  public void afterScenario(Scenario scenario) {
+    testDriver.takeScreenShot(scenario);
+    if (scenario.getSourceTagNames().contains("@reset") && TestConfiguration.isStubed()) {
+      resetRedis(scenario.getSourceTagNames());
+      resetPretender();
+    }
   }
 
-  public static String getPretenderResetURL() {
-    return getPretenderURL() + "clean-state";
-  }
-
-  public static String getRedisFlushURL(String portal) {
-    String appURL = Objects.equals(portal, "customer") ? testConfig.getCustomerAppURL() : testConfig.getAgentAppUrl();
-    return appURL.replaceFirst(portal + ".html", "redis/flush-db");
-  }
-
-  public static String getSeleniumHubURL() {
-    return testConfig.getSeleniumHubUrl();
-  }
-
-  public static int getObjectTimeOut() {
-    return testConfig.getObjectTimeOut();
-  }
-
-  public static int getPageTimeOut() {
-    return testConfig.getPageTimeOut();
-  }
-
-  public static String getEnvironment() {
-    return testConfig.getEnvironmentName();
-  }
-
-  public static boolean isStubed() {
-    return testConfig.isChannelStub();
-  }
-
-  public static boolean isRemote(){
-    return testConfig.isChannelRemote();
+  private static void resetState(String resetURL, String stateName) {
+    try {
+      HttpURLConnection connection = (HttpURLConnection) new URL(resetURL).openConnection();
+      connection.connect();
+      if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) {
+        LOGGER.error("Unable to reset the " + stateName + " using the URL: " + TestConfiguration.getPretenderResetURL());
+        LOGGER.error("Response Code: " + connection.getResponseCode());
+        LOGGER.error("Response Message: " + connection.getResponseMessage());
+        throw new RuntimeException("Unable to reset the " + stateName + ".");
+      }
+      LOGGER.info("Cleaning up state in pretender. Return Status: " + connection.getResponseMessage());
+      connection.disconnect();
+    } catch (IOException e) {
+      LOGGER.error(e.fillInStackTrace());
+    }
   }
